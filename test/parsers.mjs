@@ -56,6 +56,10 @@ const SAMPLES = [
     drawings: '26040-LGS-3-201 [3] UNIT 5 - Walls - 90mm - LB.pdf' },
   { report: 'Report_75_Trusses_Zone 16.pdf',
     drawings: '26110-LGS-16-220 [C] ZONE 16 - Trusses.pdf' },
+  // W-14394: split parts written N113(A) / N113(Infill) / N118(B)(Check
+  // Drawing), bracket straight onto the name. Its drawings exist but are
+  // flattened (no text, like Bulkhead Frames) and aren't in samples/.
+  { report: '150 Wall Z1 Ramp - Report.pdf', drawings: null },
   { report: '90mm STUDS REPORT.pdf', drawings: null },
   // W-13859 Calderwood: CA1007 listed 8 times, each ticked separately.
   { report: '89 - LS BRIDGING - Report.pdf', drawings: null }

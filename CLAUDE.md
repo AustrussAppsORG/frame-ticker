@@ -108,6 +108,30 @@ Project is shared with the structural app; tables are separate.
 | `session_log`, `frame_issues` | This app. |
 | `session_activity` | This app: Start Job / Save Progress events for the live "In progress" token. |
 | `ss_session_log`, `ss_issues` | Structural app. Leave alone. |
+| `sessions` | Austruss Frame Pack Sorter's saved pack plans. **Read only here**; never write it. |
+
+**Pack order** (`getPackPlan`, `packOrder`): when the Pack Sorter has a plan
+for the job, a Report order / Pack order toggle shows above the frame list
+(report order is the default; the choice is remembered per tablet in
+`fc_list_order`). The plan is the newest `sessions` row whose `job_wo` is the
+work order, or, since some saves have no work order (W-14394), whose
+`job_num` / `job_title` / `job_sub` equal the report header's job number,
+title and section. `content.packs` is in pack order, each a `base` plus
+`layers[].frames[]`, listed base first (the bay's choice). A pack's `skipped`
+is the sorter's working list, not part of the pack; ignore it. `unpacked` /
+`oversized` show as "Not in a pack", report frames missing from the plan as
+"Not in the pack plan". Names match on the frame name the report parser
+keeps (spacing and case in the sorter's names drift). Pack numbers stay the
+sorter's own. The Pack Sorter's source isn't in this org's GitHub.
+
+Under each pack heading `packPictureSvg` draws the pack from above, one
+panel per level, ticked frames green, the base dashed behind each layer. The
+save has sizes (`l`, `w`, already turned when `swapped`) but positions only
+for hand-placed layers (`pos`: `[along l, along w]`); otherwise a layer's
+frames sit side by side along the length, or across the width when the layer
+is `stacked`, which is how the sorter adds up `totalL` / `totalW`. A pack whose
+width is its longer side is drawn turned so it isn't a sliver. It's our
+drawing from the saved numbers, not the Pack Sorter's own picture.
 
 RLS restricts the anon (publishable) key to select and insert. The publishable
 key is hardcoded in the HTML by design; that's what it's for. The Worker's
@@ -166,6 +190,11 @@ Uses pdf.js 3.11.174 (loaded from cdnjs) to read the text layer, and pdf-lib
   text is kept as `label`, the stripped name as `name`, which is what ticks are
   stored under so a suffix changing between revisions keeps its tick. The
   report's own `Frame Count :` line lets the tests check nothing was dropped.
+- A bracket written **straight onto** the name, no space (`N113(A)`,
+  `N113(Infill)`, W-14394), is a split part, not a note: it stays in `name`
+  (so each part is its own frame) and `findDrawingPage` maps it to drawing
+  `N113`. Brackets after that, spaced or not (`N118(B)(Check Drawing)`), are
+  notes as above.
 - Drawing identity is a **strategy list, first match wins**
   (`extractDrawingNumberFromTokens`). Add to it; don't rewrite the existing
   entries, each is tuned to a real export:
