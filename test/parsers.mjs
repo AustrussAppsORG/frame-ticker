@@ -62,7 +62,30 @@ const SAMPLES = [
   { report: '150 Wall Z1 Ramp - Report.pdf', drawings: null },
   { report: '90mm STUDS REPORT.pdf', drawings: null },
   // W-13859 Calderwood: CA1007 listed 8 times, each ticked separately.
-  { report: '89 - LS BRIDGING - Report.pdf', drawings: null }
+  { report: '89 - LS BRIDGING - Report.pdf', drawings: null },
+  // Pulled from Smartsheet in Nov 2026 while checking a spread of real jobs
+  // (bay's OK to add them). Each is here for the layout noted.
+  // W-14457: both names start "75_", drawings listed first (file picking);
+  // the drawings were printed through pdfFactory, so they have no text.
+  { report: '75_Roof Panels_Report.pdf', drawings: '75_Roof Panels_Drawings.pdf' },
+  // W-13661: "GI6001 - WELD" dash notes; drawing mark big in the bottom left.
+  { report: '90mm LBW.pdf', drawings: '23314-LGS-6-201 [E] ZONE 6 - 90mm LB WALLS.pdf' },
+  // W-14378: mark in the title strip down the right-hand edge.
+  { report: '90mm Panels - Report.pdf',
+    drawings: '25403-LGS-A1-201 [B] ZONE A1 - PRODUCTION - 90mm PANELS.pdf' },
+  // W-14423: nested label GI204-2 (GI204-1 (WELD)).
+  { report: '75_GT_Report.pdf', drawings: '25455-LGS-1-230 [E] BUILDING 1 - Girder Trusses - 75mm_Zone 2.pdf' },
+  // W-14436: a "Project Material Summary" page before the frames.
+  { report: "26382_SIMON'S SHED_DETAILER REPORT.pdf", drawings: "26382_SIMON'S SHED GOLBURN (A)-220_75 TRUSSES.pdf" },
+  // W-11103: two sections (trusses, beams), drawings marked "P2-G100". The
+  // PC beams aren't in this drawings file at all, so they get no 📄.
+  { report: '23094-LGS-6-600 [A] ZONE 6 Variation - Detailer - Report.pdf',
+    drawings: '23094-LGS-6-221 [C] Zone 6 Variation - 89 - TRUSSES.pdf',
+    noDrawing: ['PC100-1', 'PC101-1', 'PC103-1', 'PC104-1', 'PC105-1'] },
+  // W-14368: FRAMECAD Structure "Mark as RF-1" (dashed marks).
+  { report: 'Report_89_Roof Panels_Control Room.pdf', drawings: '26272-LGS-0-250 [A] BUILDING  - 89 Roof Frames.pdf' },
+  // W-10905: a frame name with a space, "6m STUDS1".
+  { report: 'Pages from 21625-LGS-2-600 [A] HOUSE 2 - Detailer - Report Stud Bracing.pdf', drawings: null }
 ];
 // Kept in samples/ for later work, but the app doesn't open them yet.
 const IGNORED = {
@@ -173,12 +196,17 @@ async function checkDrawings(file){
 // Can the 📄 button on each frame find its drawing? Uses the app's own
 // findDrawingPage, the same match the button uses. When the whole drawings
 // file has no text, no frame can find a page; that's expected (see above).
-function checkPair(frames, pages){
+// A sample's `noDrawing` lists frames its drawings file really doesn't hold.
+function checkPair(frames, pages, noDrawing = []){
   const missing = frames.filter(f => !api.findDrawingPage(pages, f.name)).map(f => f.name);
   console.log('  view drawing: ' + (frames.length - missing.length) + ' of ' + frames.length + ' frames find their page');
-  if(!missing.length) return;
+  const wrong = noDrawing.filter(n => !missing.includes(n));
+  if(wrong.length) fail('expected no drawing for these, but 📄 found one: ' + list(wrong));
+  const unexpected = missing.filter(n => !noDrawing.includes(n));
+  if(missing.length && !unexpected.length) console.log('  (expected: ' + list(missing) + ' have no drawing in this file)');
+  if(!unexpected.length) return;
   if(pages.noTextPages === pages.length) console.log('  (expected: the drawings have no text, so these frames get no 📄 button)');
-  else fail(missing.length + ' frame(s) whose 📄 button finds no drawing: ' + list(missing));
+  else fail(unexpected.length + ' frame(s) whose 📄 button finds no drawing: ' + list(unexpected));
 }
 
 /* -------------------------------------------------------------------- main */
@@ -208,7 +236,7 @@ for(const job of jobs){
     const frames = await checkReport(job.report);
     if(job.drawings){
       const pages = await checkDrawings(job.drawings);
-      checkPair(frames, pages);
+      checkPair(frames, pages, job.noDrawing);
     }
   }catch(e){
     fail('threw: ' + e.message);

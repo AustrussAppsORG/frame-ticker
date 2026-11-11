@@ -322,7 +322,7 @@ calls.length = 0;
 w.eval("openJob({rowId:9, sheetId:2, workOrderId:'W-13859', zone:'25363 - Calderwood - B1'})");
 await waitFor(() => $('modalOverlay').classList.contains('show'));
 check('Cover Page, Pack Label and Mapping are never offered',
-  [...d.querySelectorAll('#modalList .pick-row .fname')].map(e => e.textContent.trim()), ['89 - LS BRIDGING - Report.pdf']);
+  [...d.querySelectorAll('#modalList .pick-row .fname')].map(e => e.textContent.replace('(likely)', '').trim()), ['89 - LS BRIDGING - Report.pdf']);
 click(d.querySelector('#modalList .pick-row'));
 await waitFor(() => d.querySelectorAll('#frameList .frame-row').length === 3);
 check('bridging job: opens as report-only, only the report downloaded',
@@ -337,12 +337,42 @@ rowAttachments = [att(60, '24477-LGS-C2-600 [1] ZONE C2 - Detailer - Report - 15
                   att(65, '24477-LGS-C2-200 [A] ZONE C2 - PRODUCTION - 150mm WALLS.pdf')];
 calls.length = 0;
 w.eval("openJob({rowId:9, sheetId:2, workOrderId:'W-12935', zone:'24477 - Tallawong - C2'})");
+await waitFor(() => d.querySelectorAll('#frameList .frame-row').length === 3 &&
+  calls.filter(c => c.url.includes('/download')).length === 2);
+check('24477 C2: names say report and drawings, so it opens without asking',
+  [$('modalOverlay').classList.contains('show'),
+   calls.filter(c => c.url.includes('/download')).map(c => new URL(c.url).searchParams.get('attachmentId')).sort()],
+  [false, ['60', '65']]);
+
+// W-14457: both names start with a number and an underscore, drawings listed
+// first. The old rule opened the drawings as the report.
+rowAttachments = [att(66, '75_Roof Panels_Drawings.pdf'), att(67, '75_Roof Panels_Report.pdf'),
+                  att(68, 'Pack Label_W-14457.pdf'), att(69, '150 Wall Z1 - Pack Helper.pdf')];
+calls.length = 0;
+w.eval("openJob({rowId:9, sheetId:2, workOrderId:'W-14457', zone:'25455 - Hurley Park - 3'})");
+await waitFor(() => d.querySelectorAll('#frameList .frame-row').length === 3 && w.eval('!!AppState.drawingsPdf'));
+check('W-14457: the Report is the report and the Drawings the drawings (Pack Helper never offered)',
+  [w.eval('AppState.detailerSource.sourceId'),
+   calls.filter(c => c.url.includes('/download')).map(c => new URL(c.url).searchParams.get('attachmentId')).sort()],
+  [67, ['66', '67']]);
+
+// Names that don't say which is which: the operator picks, and cancelling
+// the picker leaves a way back to it.
+rowAttachments = [att(71, 'Walls A.pdf'), att(72, 'Walls B.pdf')];
+w.eval("openJob({rowId:9, sheetId:2, workOrderId:'W-105', zone:'X'})");
 await waitFor(() => $('modalOverlay').classList.contains('show'));
-check('24477 C2: pack list hidden too, leaving report and drawings', d.querySelectorAll('#modalList .pick-row').length, 2);
-click(d.querySelector('#modalList .pick-row'));
-await waitFor(() => d.querySelectorAll('#frameList .frame-row').length === 3);
-check('24477 C2: the production drawings are taken without asking',
-  calls.filter(c => c.url.includes('/download')).map(c => new URL(c.url).searchParams.get('attachmentId')).sort(), ['60', '65']);
+check('unclear names: the operator picks', $('modalTitle').textContent, 'Which file is the detailer report?');
+w.eval('closeModal()');
+check('cancelling the picker leaves a way back, not a spinner',
+  [!!d.querySelector('#frameList .spinner'), !!$('btnChooseFiles')], [false, true]);
+click($('btnChooseFiles'));
+await waitFor(() => $('modalOverlay').classList.contains('show'));
+calls.length = 0;
+click(d.querySelectorAll('#modalList .pick-row')[1]);
+await waitFor(() => d.querySelectorAll('#frameList .frame-row').length === 3 &&
+  calls.filter(c => c.url.includes('/download')).length === 2);
+check('with one file left, it is taken as the drawings',
+  calls.filter(c => c.url.includes('/download')).map(c => new URL(c.url).searchParams.get('attachmentId')).sort(), ['71', '72']);
 
 // A failure after the picker shows a message instead of spinning forever.
 rowAttachments = [att(70, 'Broken report.pdf')];
@@ -355,20 +385,17 @@ await waitFor(() => !!d.querySelector('#frameList .empty') && !d.querySelector('
 check('a failed download says so instead of spinning', (d.querySelector('#frameList .empty') || {}).textContent, 'Couldn\'t load this job.Download failed: boom');
 w.fetch = okFetch;
 
-// Normal job. The real report names don't match CONFIG.DETAILER_NAME_RE, so
-// the operator picks it; the bay has accepted that.
+// Normal job: the names say which is the report (Detailer - Report, 600)
+// and which the drawings (201), so it opens without the picker. The app's
+// own IN PROGRESS uploads and non-PDFs are ignored.
 rowAttachments = [att(10, REPORT), att(11, DRAWINGS), att(12, 'IN PROGRESS: 90 - LB WALLS.pdf'), att(13, 'notes.dxf')];
+calls.length = 0;
 w.eval("openJob({rowId:1, sheetId:2, workOrderId:'W-100', zone:'UNIT 5', machine:'Red 90'})");
 check('the open job\'s header shows its machine', $('jobHeader').textContent, 'W-100 \u2014 UNIT 5Red 90');
-await waitFor(() => $('modalOverlay').classList.contains('show'));
-check('picker lists only the original PDFs (no IN PROGRESS, no .dxf)',
-  [...d.querySelectorAll('#modalList .pick-row .fname')].map(e => e.textContent.trim()), [REPORT, DRAWINGS]);
-check('cancelling the picker leaves a way back, not a spinner',
-  [!!d.querySelector('#frameList .spinner'), !!$('btnChooseFiles')], [false, true]);
-click(d.querySelectorAll('#modalList .pick-row')[0]);
-await waitFor(() => d.querySelectorAll('#frameList .frame-row').length === 3);
+await waitFor(() => d.querySelectorAll('#frameList .frame-row').length === 3 && w.eval('!!AppState.drawingsPdf'));
 const downloads = calls.filter(c => c.url.includes('/download')).map(c => new URL(c.url).searchParams.get('attachmentId'));
-check('with one file left, it is taken as the drawings: both downloaded', downloads.slice(-2).sort(), ['10', '11']);
+check('opens without asking: report and drawings downloaded, nothing else',
+  [$('modalOverlay').classList.contains('show'), downloads.sort()], [false, ['10', '11']]);
 check('the Drawings tab is back for a job with drawings', d.querySelector('#tabbar button[data-tab="drawings"]').style.display, '');
 check('remembers which clean report version it works from',
   w.eval('JSON.stringify(AppState.detailerSource)'), '{"sourceId":10,"skipId":null}');
@@ -618,8 +645,10 @@ await openWithChoice('cancel');
 check('cancel counts as keep', w.eval('JSON.stringify(AppState.detailerSource)'), '{"sourceId":70,"skipId":80}');
 pdfKeywords = '';
 
-// The picker badges a report with a designer revision since the last save.
-rowAttachments = [att(77, REPORT), att(11, DRAWINGS)];
+// When the names don't settle it and the picker shows, it badges a report
+// with a designer revision since the last save. (Versions are looked up by
+// attachment id, so only the names change here.)
+rowAttachments = [att(77, 'UNIT 5 LB Walls.pdf'), att(11, 'UNIT 5 Walls.pdf')];
 w.eval("openJob({rowId:1, sheetId:2, workOrderId:'W-100', zone:'UNIT 5'})");
 await waitFor(() => !!d.querySelector('#modalList .pick-row .tag-chip'));
 check('NEW REVISION badge on the report in the picker',
