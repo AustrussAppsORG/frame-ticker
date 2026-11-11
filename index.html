@@ -217,13 +217,22 @@
   .machine-chip.unset{color:var(--muted);font-weight:700;}
   #jobHeader .machine-chip{height:22px;margin-left:8px;vertical-align:middle;font-size:12px;
     border-color:rgba(255,255,255,.3);background:transparent;color:#fff;}
-  .badge{
-    display:inline-block;padding:4px 12px;border-radius:20px;
-    font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.03em;
+  /* Status tokens on the card's dark top bar. */
+  .status-tokens{display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;}
+  .live-token{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:4px 10px;border-radius:20px;background:var(--good);color:#fff;
+    font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap;
   }
-  .badge.not-started{background:#4A4744;color:#EDEAE5;}
-  .badge.partial{background:var(--orange);color:#fff;}
-  .badge.complete{background:var(--good);color:#fff;}
+  .live-token .pulse{width:8px;height:8px;border-radius:50%;background:#fff;animation:pulse 1.6s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.25;}}
+  .started-token{
+    display:inline-block;padding:3px 10px;border-radius:20px;
+    border:2px solid rgba(255,255,255,.25);color:#CFCAC3;
+    font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap;
+  }
+  .started-token.yes{border-color:rgba(255,255,255,.6);color:#fff;}
+  .started-token.complete{border-color:var(--good);background:var(--good);color:#fff;}
 
   /* ---------- Job list: which list + search ---------- */
   #jobListTabs{display:flex;gap:6px;margin-bottom:10px;}
@@ -804,6 +813,55 @@ async function addSessionLogRow(fields){
   if(!res.ok){
     const body = await res.text().catch(()=> '');
     throw new Error('Session log save failed (' + res.status + '): ' + body.slice(0,200));
+  }
+}
+
+// Live "in progress" status, shared across tablets: Start Job writes a
+// 'start' row to session_activity and a logged Save Progress writes the
+// matching 'end' (same work order + session_start). The table is insert-only
+// like session_log, so a session is open while its start has no end. A start
+// older than ACTIVE_SESSION_HOURS is ignored, in case a tablet was put down
+// and never saved; the bay works single shifts.
+const ACTIVE_SESSION_HOURS = 12;
+
+async function addSessionActivity(fields){
+  const res = await fetch(SUPABASE_URL + '/rest/v1/session_activity', {
+    method: 'POST',
+    headers: supabaseHeaders({ 'Content-Type': 'application/json', 'Prefer': 'return=minimal' }),
+    body: JSON.stringify(fields)
+  });
+  if(!res.ok){
+    const body = await res.text().catch(()=> '');
+    throw new Error('(' + res.status + ') ' + body.slice(0,200));
+  }
+}
+
+// rows: session_activity rows, any order. Returns { work_order_id: earliest
+// open session_start (ISO) }. Pure, so the tests can check it.
+function openSessionsFrom(rows, nowMs){
+  const cutoff = nowMs - ACTIVE_SESSION_HOURS * 3600e3;
+  const t = v => new Date(v).getTime();
+  const ended = new Set(rows.filter(r => r.event === 'end').map(r => r.work_order_id + '|' + t(r.session_start)));
+  const open = {};
+  rows.forEach(r => {
+    if(r.event !== 'start' || !r.work_order_id || !(t(r.session_start) >= cutoff)) return;
+    if(ended.has(r.work_order_id + '|' + t(r.session_start))) return;
+    if(!open[r.work_order_id] || t(r.session_start) < t(open[r.work_order_id])) open[r.work_order_id] = r.session_start;
+  });
+  return open;
+}
+
+// Which jobs have a session open on any tablet right now. {} on any failure:
+// the job list just shows no live tokens.
+async function getOpenSessions(){
+  try{
+    const since = new Date(Date.now() - ACTIVE_SESSION_HOURS * 3600e3).toISOString();
+    const res = await fetch(SUPABASE_URL + '/rest/v1/session_activity?select=work_order_id,event,session_start' +
+      '&created_at=gte.' + encodeURIComponent(since), { headers: supabaseHeaders() });
+    if(!res.ok) return {};
+    return openSessionsFrom(await res.json(), Date.now());
+  }catch(e){
+    return {};
   }
 }
 
@@ -1650,6 +1708,19 @@ function jobMatches(job, term){
   return term.toLowerCase().split(/\s+/).filter(Boolean).every(w => hay.includes(w));
 }
 
+// Session counts (session_log) and open sessions (session_activity) for the
+// jobs in a list. A session started on this tablet counts as open even if its
+// start never reached Supabase (offline), so this tablet's own token shows.
+async function refreshJobActivity(jobs, listName){
+  const [counts, open] = await Promise.all([getSessionCounts(), getOpenSessions()]);
+  jobs.forEach(j => {
+    j.sessionCount = counts[j.workOrderId] || 0;
+    const local = Store.getSessionStart(j.rowId);
+    j.liveSince = open[j.workOrderId] || (local && local.startTime) || null;
+  });
+  if(AppState.jobList === listName) renderJobList();
+}
+
 // force: fetch the report again even if it's already been loaded (Refresh).
 async function loadJobs(force){
   const listName = AppState.jobList;
@@ -1660,6 +1731,9 @@ async function loadJobs(force){
   if(cached && !force){
     AppState.jobs = cached.filter(list.keep);
     renderJobList();
+    // Who's working on what changes by the minute, so the live tokens are
+    // fetched again even when the job list itself comes from the cache.
+    refreshJobActivity(cached, listName);
     return;
   }
   container.innerHTML = '<div class="spinner"></div>';
@@ -1670,15 +1744,25 @@ async function loadJobs(force){
     if(AppState.jobList !== listName) return;
     AppState.jobs = jobs.filter(list.keep);
     renderJobList();
-    // Session counts render after the main list — no need to hold up the
-    // list itself waiting on a second fetch.
-    const counts = await getSessionCounts();
-    jobs.forEach(j => { j.sessionCount = counts[j.workOrderId] || 0; });
-    if(AppState.jobList === listName) renderJobList();
+    // Session counts and live sessions render after the main list — no need
+    // to hold up the list itself waiting on more fetches.
+    await refreshJobActivity(jobs, listName);
   }catch(e){
     if(AppState.jobList === listName)
       container.innerHTML = '<div class="empty">Couldn\'t load jobs.<br>' + escapeHtml(e.message) + '</div>';
   }
+}
+
+// "Started" once the app has any record of work on the job: a saved
+// session, a session open now, or Smartsheet already past Not Started (Save
+// Progress without Start Job logs no session; Smartsheet's status covers it).
+function jobStarted(job){
+  return !!(job.sessionCount || job.liveSince ||
+    (job.complete && job.complete !== 'Not Started'));
+}
+function formatTime(iso){
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
 }
 
 // The Scheduled Machine chip: a dot in the machine's colour plus its name
@@ -1706,8 +1790,11 @@ function renderJobList(){
   }
   container.innerHTML = '';
   visible.forEach(job => {
-    const badgeClass = job.complete === 'Partially Complete' ? 'partial'
-                     : job.complete === 'Complete' ? 'complete' : 'not-started';
+    // The card no longer shows Smartsheet's Complete badge (the bay found
+    // Partially Complete unnecessary next to these tokens), except that a
+    // job marked Complete says so instead of just "Started".
+    const done = job.complete === 'Complete';
+    const started = jobStarted(job);
     const sessionCount = job.sessionCount || 0;
     const div = document.createElement('div');
     div.className = 'job-card';
@@ -1715,7 +1802,12 @@ function renderJobList(){
       '<div class="card-top">' +
         '<span class="wo-id">' + escapeHtml(job.workOrderId || '\u2014') + '</span>' +
         (job.workRecordUrl ? '<button class="link-btn" data-url="' + escapeHtml(job.workRecordUrl) + '">Work Record &#8599;</button>' : '') +
-        '<span class="badge ' + badgeClass + '">' + escapeHtml(job.complete || 'Not Started') + '</span>' +
+        '<span class="status-tokens">' +
+          (job.liveSince ? '<span class="live-token" title="Session started ' + escapeHtml(formatTime(job.liveSince)) + '">' +
+            '<span class="pulse"></span>In progress</span>' : '') +
+          '<span class="started-token' + (done ? ' complete' : started ? ' yes' : '') + '">' +
+            (done ? 'Complete' : started ? 'Started' : 'Not started') + '</span>' +
+        '</span>' +
       '</div>' +
       '<div class="card-body">' +
         '<div class="zone">' + escapeHtml(job.zone) + '</div>' +
@@ -2346,7 +2438,12 @@ document.getElementById('btnStartJob').addEventListener('click', () => {
     doneAtStart: Array.from(AppState.sessionStartDoneSet)
   });
   updateSessionBar();
-  toast('Job started', 'ok');
+  const job = AppState.currentJob;
+  job.liveSince = AppState.sessionStartTime;
+  addSessionActivity({ work_order_id: job.workOrderId, zone: job.zone, event: 'start',
+                       session_start: AppState.sessionStartTime })
+    .then(() => toast('Job started', 'ok'))
+    .catch(e => toast('Job started, but other tablets won\'t see it yet: ' + e.message, 'err'));
 });
 
 document.getElementById('btnViewSessions').addEventListener('click', async () => {
@@ -2451,6 +2548,12 @@ document.getElementById('btnSaveProgress').addEventListener('click', async () =>
           total_linear_metres_done: Math.round(totalMetres * 100) / 100
         });
         Store.clearSessionStart(AppState.currentJob.rowId);
+        // Close the live session for every tablet. Not fatal if it fails:
+        // the start drops off after ACTIVE_SESSION_HOURS anyway.
+        const startedAt = AppState.sessionStartTime;
+        addSessionActivity({ work_order_id: AppState.currentJob.workOrderId, zone: AppState.currentJob.zone,
+                             event: 'end', session_start: startedAt }).catch(() => {});
+        AppState.currentJob.liveSince = null;
         AppState.sessionStartTime = null;
         AppState.sessionStartDoneSet = new Set();
         updateSessionBar();

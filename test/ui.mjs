@@ -79,7 +79,7 @@ const code = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(x => x[1]).
 const expose = '\n;Object.assign(window,{Store,AppState,CONFIG,renderJobList,renderFrameList,showScreen,' +
                'setTabbarVisible,openJob,getWorkOrders,renderSessionList,updateSessionBar,' +
                'pickWorkingVersion,markupKeywords,parseMarkupKeywords,loadWorkingDetailer,findDrawingPage,' +
-               'getPackPlan,packOrder,updateOrderBar});';
+               'getPackPlan,packOrder,updateOrderBar,openSessionsFrom});';
 try{
   w.eval(code + expose);
 }catch(e){
@@ -153,6 +153,32 @@ w.eval(`AppState.jobs = ${JSON.stringify(jobs)}; AppState.jobSearchTerm = ''; re
 check('job card shows the machine with its colour, or "No machine"',
   [...d.querySelectorAll('.job-card .machine-chip')].map(e => e.className + ': ' + e.textContent),
   ['machine-chip m-red: Red 90', 'machine-chip unset: No machine']);
+
+console.log('\njob list: in progress now / started');
+const H = 3600e3, NOW = Date.parse('2026-11-04T02:00:00Z'), at = h => new Date(NOW - h * H).toISOString();
+const open = w.eval(`openSessionsFrom(${JSON.stringify([
+  { work_order_id: 'W-1', event: 'start', session_start: at(1) },                        // open
+  { work_order_id: 'W-2', event: 'start', session_start: at(2) },                        // saved since
+  { work_order_id: 'W-2', event: 'end', session_start: at(2).replace('Z', '+00:00') },   // (Supabase's format)
+  { work_order_id: 'W-3', event: 'start', session_start: at(13) },                       // too old: never saved
+  { work_order_id: 'W-4', event: 'start', session_start: at(3) },                        // two tablets on one job:
+  { work_order_id: 'W-4', event: 'start', session_start: at(1) },                        // earliest start shows
+  { work_order_id: 'W-4', event: 'end', session_start: at(1) }
+])}, ${NOW})`);
+check('open sessions: started and not saved, from any tablet, within 12 hours', JSON.parse(JSON.stringify(open)), { 'W-1': at(1), 'W-4': at(3) });
+w.eval(`AppState.jobs = ${JSON.stringify([
+  Object.assign({}, jobs[0], { liveSince: at(1), sessionCount: 2, complete: 'Partially Complete' }),
+  Object.assign({}, jobs[0], { workOrderId: 'W-5', liveSince: null, sessionCount: 1, complete: 'Not Started' }),
+  Object.assign({}, jobs[0], { workOrderId: 'W-6', liveSince: null, sessionCount: 0, complete: 'Not Started' })
+])}; renderJobList();`);
+check('card top: In progress token (if open), then Started / Not started; no Smartsheet badge',
+  [...d.querySelectorAll('.job-card')].map(c => [...c.querySelectorAll('.status-tokens > span')].map(e => e.textContent)),
+  [['In progress', 'Started'], ['Started'], ['Not started']]);
+w.eval(`AppState.jobs[0].complete = 'Complete'; AppState.jobs[0].liveSince = null; renderJobList();`);
+check('a job Smartsheet marks Complete says Complete', d.querySelector('.job-card .started-token').textContent, 'Complete');
+check('no status badge left on any card', d.querySelectorAll('.job-card .badge').length, 0);
+
+console.log('\nwork orders from the Work Order sheet');
 reportCalls.length = 0;
 const fromSheet = JSON.parse(await w.eval("getWorkOrders(null, CONFIG.WORK_ORDER_SHEET_ID).then(j => JSON.stringify(j))"));
 check('the Work Order sheet is read in full, FRAMECAD only', fromSheet.length, 990);
@@ -176,7 +202,7 @@ check('no Complete job in it', d.querySelectorAll('.job-card .badge.complete').l
 const fetchedSoFar = reportCalls.length;
 click(tabs()[2]);
 await tick(50);
-check('Completed: every Complete FRAMECAD work order, badged green', [d.querySelectorAll('.job-card').length, d.querySelectorAll('.job-card .badge.complete').length], [220, 220]);
+check('Completed: every Complete FRAMECAD work order, marked Complete', [d.querySelectorAll('.job-card').length, d.querySelectorAll('.job-card .started-token.complete').length], [220, 220]);
 check('switching between the two shares one fetch', reportCalls.length, fetchedSoFar);
 click($('btnRefreshJobs'));
 await waitFor(() => reportCalls.length > fetchedSoFar);
@@ -460,7 +486,11 @@ click($('btnStartJob'));
 check('Start Job swaps to the session status', [$('btnStartJob').style.display, $('sessionStatus').style.display], ['none', 'block']);
 check('session start kept on the device with the frames done so far',
   JSON.parse(w.localStorage.getItem('fc_session_1')).doneAtStart, ['L500']);
-check('Start Job alone writes nothing', calls.filter(c => c.method === 'POST').length, 0);
+const startPosts = calls.filter(c => c.method === 'POST');
+const startRow = startPosts[0] ? JSON.parse(startPosts[0].body) : {};
+check('Start Job alone only marks the job in progress for other tablets (no session logged)',
+  [startPosts.map(c => new URL(c.url).pathname), startRow.event, startRow.work_order_id, startRow.session_start],
+  [['/rest/v1/session_activity'], 'start', 'W-100', JSON.parse(w.localStorage.getItem('fc_session_1')).startTime]);
 click(rows()[1]);   // L501 done during the session
 
 w.eval(`
@@ -484,6 +514,9 @@ check('session logged to Supabase with only this session\'s frames',
   [logged.frames_completed_this_session, logged.frames_completed_count, logged.linear_metres_this_session],
   [['L501'], 1, 10.5]);
 check('and the job totals at this save', [logged.total_frames_done, logged.total_linear_metres_done], [2, 30.5]);
+const endCall = calls.find(c => c.url.includes('/rest/v1/session_activity') && c.method === 'POST');
+check('a logged save closes the live session (same start time)',
+  endCall && [JSON.parse(endCall.body).event, JSON.parse(endCall.body).session_start], ['end', startRow.session_start]);
 check('session cleared after saving',
   [$('sessionStatus').style.display, w.localStorage.getItem('fc_session_1')], ['none', null]);
 
@@ -498,7 +531,7 @@ up = uploads[0] ? new URL(uploads[0].url).searchParams : new URLSearchParams();
 check('later saves: a new version of the report\'s live id, not the stale one',
   [up.get('mode'), up.get('attachmentId'), up.get('filename')], ['version', '60', REPORT]);
 check('still keyworded with the clean source', w.eval('JSON.stringify(window.__keywords)'), '["austruss-fc-markup","fc-source:10"]');
-check('no session running: nothing logged', calls.some(c => c.url.includes('/rest/v1/session_log')), false);
+check('no session running: nothing logged', calls.some(c => c.url.includes('/rest/v1/session_log') || c.url.includes('/rest/v1/session_activity')), false);
 
 /* ------------------------------------------------ versions: which to use */
 console.log('\nversions: which report version to work from');

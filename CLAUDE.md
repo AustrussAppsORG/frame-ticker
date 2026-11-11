@@ -106,6 +106,7 @@ Project is shared with the structural app; tables are separate.
 | Table | Used by |
 |---|---|
 | `session_log`, `frame_issues` | This app. |
+| `session_activity` | This app: Start Job / Save Progress events for the live "In progress" token. |
 | `ss_session_log`, `ss_issues` | Structural app. Leave alone. |
 | `sessions` | Austruss Frame Pack Sorter's saved pack plans. **Read only here**; never write it. |
 
@@ -211,8 +212,22 @@ An inline listener on `#btnSaveProgress`. It marks up only the report
 duplicate. (It used to upload a separate `IN PROGRESS: <num> - <NAME>.pdf`;
 those older uploads stay hidden by `IN_PROGRESS_ATTACHMENT_RE`.) If Start Job
 was pressed, it then writes one `session_log` row with the frames ticked since
-then and their metres, and clears the session. Start Job on its own writes
-nothing. Ported from Structural-Checklist PR #2.
+then and their metres, and clears the session. Ported from
+Structural-Checklist PR #2.
+
+**Live status.** Start Job writes one `session_activity` row (`event:
+'start'`, the session's start time) so every tablet's job list can show an
+**In progress** token; a logged save writes the matching `'end'` (same work
+order + `session_start`). That table is insert-only like the others, so a
+session is open while its start has no end (`openSessionsFrom`), and starts
+older than `ACTIVE_SESSION_HOURS` (12) are ignored in case a tablet never
+saves. This tablet's own open session always counts, even if its start didn't
+reach Supabase. Next to it the card says **Started** once the job has a saved
+session, an open one, or Smartsheet's Complete is past Not Started (Save
+Progress without Start Job logs no session); otherwise **Not started**; and
+**Complete** when Smartsheet's Complete says so. The card shows no other
+Smartsheet status badge: the bay found Partially Complete unnecessary. Start
+Job writes nothing else: no `session_log` row until the save.
 
 **Never work from the app's own markup**, or each save stacks new marks on old
 ones. So opening a job always goes back to a clean report version
