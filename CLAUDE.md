@@ -90,14 +90,20 @@ look there first for the fix.
 - Attachments: PDFs only, minus the app's own `IN PROGRESS:` uploads and
   `CONFIG.EXCLUDED_ATTACHMENT_RE`: Smartsheet's generated `Cover Page…`,
   `Pack Label…` and `Mapping for Work Order Weld Label.pdf`, which must
-  **never** be offered, and pack lists (to be used later). With those gone a
-  typical row is just report + drawings, or the report alone. The
-  report is recognised by `CONFIG.DETAILER_NAME_RE` and the drawings by
-  `CONFIG.DRAWINGS_NAME_RE`; when either is missing the operator picks from a
-  list. Real report names (`26040-LGS-3-600 [1] UNIT 5 - Detailer - Report -
-  90_LB Walls.pdf`) don't match `DETAILER_NAME_RE`, so in practice the picker
-  shows on every job. The bay has accepted that: the files always sit together
-  on one row.
+  **never** be offered, pack lists (to be used later) and Pack Helper sheets
+  (the Frame Pack Sorter's input). With those gone a typical row is just
+  report + drawings, or the report alone.
+- `guessJobFiles` tells them apart by what the names say: a report says
+  "Report" or "Detailer" (`CONFIG.REPORT_NAME_RE`), drawings say "Drawing",
+  "Production" or carry a 2xx register number (`24400-LGS-3-200`; the
+  report's own is 6xx) (`CONFIG.DRAWINGS_NAME_RE`). A name counts only if it
+  says one and not the other, and only if one file says it; with just two
+  files, naming one settles the other (`75 Trusses_C0S.pdf` beside
+  `22095-LGS-44-220 … Trusses.pdf`). When both are settled the job opens
+  straight away; otherwise the operator picks. Checked against 16 real jobs
+  (Nov 2026), all right. The old rule ("starts with a number and an
+  underscore") matched W-14457's `75_Roof Panels_Drawings.pdf`, listed first,
+  and opened the drawings as the report.
 
 ## Supabase
 
@@ -108,7 +114,7 @@ Project is shared with the structural app; tables are separate.
 | `session_log`, `frame_issues` | This app. |
 | `session_activity` | This app: Start Job / Save Progress events for the live "In progress" token. |
 | `ss_session_log`, `ss_issues` | Structural app. Leave alone. |
-| `sessions` | Austruss Frame Pack Sorter's saved pack plans. **Read only here**; never write it. |
+| `sessions` | Austruss Frame Pack Sorter's saved pack plans. **Read only here**; never write it. Its RLS (the sorter's own) lets the public key update and delete too. |
 
 **Pack order** (`getPackPlan`, `packOrder`): when the Pack Sorter has a plan
 for the job, a Report order / Pack order toggle shows above the frame list
@@ -186,10 +192,18 @@ Uses pdf.js 3.11.174 (loaded from cdnjs) to read the text layer, and pdf-lib
   back to the portrait layout, and flags the frames `turned` so
   `annotateDetailerPdf` draws its band and OK sideways to match.
 - `extractDetailerReport` matches each row against one regex (`rowRe`). The
-  frame name may carry `(...)` suffixes (`BE3000 (WELD) (CHECK)`): the full
+  frame name may carry notes: `(...)` suffixes (`BE3000 (WELD) (CHECK)`), a
+  bracket holding a bracket (`GI204-2 (GI204-1 (WELD))`, W-14423), or a
+  spaced dash (`GI6001 - WELD`, `LB6005 - Check Drawing`, W-13661). The full
   text is kept as `label`, the stripped name as `name`, which is what ticks are
-  stored under so a suffix changing between revisions keeps its tick. The
-  report's own `Frame Count :` line lets the tests check nothing was dropped.
+  stored under so a suffix changing between revisions keeps its tick. A name
+  can hold a space (`6m STUDS1`, W-10905); the name is matched lazily so notes
+  still split off first. The report's own `Frame Count :` line lets the tests
+  check nothing was dropped; a report with several sections (89 - TRUSSES
+  then 89 - BEAMS, W-11103) has a count per section, and they're summed.
+- A **Project Material Summary** page (one row per category: Truss, Internal
+  Wall, Miscellaneous …) can come before the frames (W-14436). Its rows are
+  not frames and are skipped.
 - A bracket written **straight onto** the name, no space (`N113(A)`,
   `N113(Infill)`, W-14394), is a split part, not a note: it stays in `name`
   (so each part is its own frame) and `findDrawingPage` maps it to drawing
@@ -201,6 +215,18 @@ Uses pdf.js 3.11.174 (loaded from cdnjs) to read the text layer, and pdf-lib
   1. `extractDrawingNumber_PhoneAnchor`: FRAMECAD Detailer panels/beams, the
      number sits next to the office phone number (`02 4860 14xx`), either side.
   2. `extractDrawingNumber_MarkAs`: FRAMECAD Structure, `Mark as N237`.
+  3. `extractDrawingNumber_MarkAsDashed`: FRAMECAD Structure with a dashed
+     mark, `Mark as RF-1` (26272) or `Mark as P2-G100` (23094).
+  4. `extractDrawingNumber_TitleStrip`: 2026 Detailer title block (25403),
+     the mark is the only mark-shaped text in the strip down the right-hand
+     edge (x > 85% of the page width).
+  5. `extractDrawingNumber_LargestMark`: 2026 Detailer title block (23314,
+     24400, 24477-C3), the page's own mark printed big (19pt) bottom left,
+     neighbours' marks small. Only answers when it's 25% bigger than the next
+     mark, because on 25403 a neighbour outsizes the strip's mark and a wrong
+     📄 page is worse than none.
+- `findDrawingPage` also takes a `P<n>-` phase prefix on the drawing
+  (`P2-G100` for report frame `G100-1`, W-11103).
 - `extractTags` reads WELD ALL/PART/STP/SHS, GUSSET, STP, SHS, DOUBLE SCREW
   and GIRDER off each drawing page.
 
@@ -260,10 +286,14 @@ deliberate change to the test.
   that as long as they can be viewed: the pages show as "Pg N" and their
   frames get no 📄. The tests report this as expected. The structural app
   shows a hint on such pages; not ported (the bay didn't ask for it).
-- When a row has the report plus exactly one other PDF (after the exclusions
-  above), that PDF is taken as the drawings without asking.
-- Nested labels like `GI100-2 (GI100-1 (WELD))` wouldn't match `rowRe`; no
-  sample has one yet.
+- Drawings printed through **pdfFactory Pro** come out with no text
+  (W-14394, W-14457, W-11998, W-13848), same as above. The fix is for the
+  detailers to export straight from FRAMECAD; nothing to do in the app.
+- When the operator picks the report and exactly one other PDF is left, that
+  PDF is taken as the drawings without asking.
+- Pack order: the sorter can split a frame the report lists once
+  (`LB6038-A` / `LB6038-B` against report `LB6038`, W-13661); that frame
+  shows under "Not in the pack plan".
 - Uploads show as authored by whoever owns the Worker's token, not the operator.
 - If whoever owns the Worker's Smartsheet token also uploads reports from that
   same login, the app will take those uploads for its own saves and skip them
