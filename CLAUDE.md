@@ -258,7 +258,7 @@ check with the bay before adding a file.
 Every change goes on a branch with a pull request; never push to `main`. To try
 a branch on the real tablet setup:
 
-`https://raw.githack.com/natnewcombe/frame-ticker/<branch>/index.html`
+`https://raw.githack.com/AustrussAppsORG/frame-ticker/<branch>/index.html`
 
 Saves from there are real Smartsheet and Supabase writes, so use a test job.
 localStorage is per address, so the Worker URL and APP_KEY need entering once
