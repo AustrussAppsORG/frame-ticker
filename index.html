@@ -301,6 +301,43 @@
     border:none;border-radius:11px;background:var(--charcoal-2);color:#fff;
     font-size:14px;font-weight:700;display:none;
   }
+  /* ---------- Report / pack order toggle + pack headings ---------- */
+  #orderBar{
+    display:flex;gap:6px;
+    padding:10px 14px;background:var(--card);
+    border-bottom:1px solid var(--line);
+  }
+  #orderBar button{
+    flex:1;min-height:var(--tap);padding:0 6px;
+    border:2px solid var(--line);border-radius:12px;
+    background:var(--card);color:var(--text);font-size:15px;font-weight:700;
+  }
+  #orderBar button.active{background:var(--charcoal);border-color:var(--charcoal);color:#fff;}
+  .pack-header{
+    display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+    padding:12px 14px 8px;background:var(--bg);
+    border-bottom:2px solid var(--orange);
+    font-size:15px;font-weight:800;color:var(--charcoal);
+  }
+  .pack-header .pack-meta{font-size:13px;font-weight:700;color:var(--muted);}
+  .pack-header.done .pack-meta{color:var(--good);}
+  .frame-row .pack-where{font-size:12px;font-weight:700;color:var(--muted);}
+  /* Pack picture: each level from above. Not tappable (ticking is in the
+     list below it), so it can be small. */
+  .pack-picture{
+    display:flex;flex-wrap:wrap;gap:10px 14px;
+    padding:10px 14px 12px;background:var(--card);
+    border-bottom:1px solid var(--line);
+  }
+  .pp-level{margin:0;}
+  .pp-level figcaption{font-size:12px;font-weight:700;color:var(--muted);margin-bottom:3px;}
+  .pp-level svg{display:block;overflow:visible;}
+  .pp-level rect{stroke-width:1.2;}
+  .pp-todo{fill:#fff;stroke:var(--charcoal);}
+  .pp-done{fill:#CFE8D4;stroke:var(--good);}
+  .pp-other{fill:var(--bg);stroke:var(--muted);stroke-dasharray:3 2;}
+  .pp-outline{fill:none;stroke:var(--muted);stroke-dasharray:4 3;stroke-width:1;}
+  .pp-level text{font-size:10.5px;font-weight:700;fill:var(--charcoal);text-anchor:middle;dominant-baseline:central;}
   .frame-row{
     display:flex;align-items:center;gap:14px;
     background:var(--card);
@@ -556,6 +593,11 @@
           <input type="text" id="searchInput" placeholder="Search frame name..." autocomplete="off">
           <button id="btnClearSearch">Clear</button>
         </div>
+        <!-- Only shown when the Frame Pack Sorter has a plan for this job. -->
+        <div id="orderBar" style="display:none;">
+          <button data-order="report" class="active">Report order</button>
+          <button data-order="pack">Pack order</button>
+        </div>
       </div>
       <div id="frameList"></div>
     </div>
@@ -680,6 +722,16 @@ const Store = {
   },
   clearSessionStart(rowId){
     localStorage.removeItem('fc_session_'+rowId);
+  },
+
+  // Report or pack order for the frame list: a per-tablet preference, so an
+  // operator who works in pack order doesn't have to pick it on every job.
+  getListOrder(){
+    try{ return localStorage.getItem('fc_list_order') === 'pack' ? 'pack' : 'report'; }
+    catch(e){ return 'report'; }
+  },
+  setListOrder(order){
+    try{ localStorage.setItem('fc_list_order', order); }catch(e){}
   }
 };
 
@@ -854,6 +906,36 @@ async function getIssuesForJob(workOrderId){
     byFrame[r.frame_name].push(r);
   });
   return byFrame;
+}
+
+// The latest pack plan saved for this job by the Austruss Frame Pack Sorter
+// app, in its `sessions` table (shared Supabase project; read only here,
+// this app never writes it). Most saves carry the work order (job_wo), but
+// some don't (W-14394), so a save with no work order also counts when its
+// job number, title and section match the report header exactly; the Pack
+// Sorter reads those from the same report. Newest save wins (the bay's
+// choice). Resolves null when there's no plan or Supabase can't be reached:
+// the list just stays in report order.
+async function getPackPlan(workOrderId, header){
+  const q = v => '"' + String(v).replace(/["\\]/g, '\\$&') + '"';
+  const either = [];
+  if(workOrderId) either.push('job_wo.eq.' + q(workOrderId));
+  if(header && header.jobNumber && header.title && header.sectionTitle){
+    either.push('and(job_num.eq.' + q(header.jobNumber) + ',job_title.eq.' + q(header.title) +
+      ',job_sub.eq.' + q(header.sectionTitle) + ',or(job_wo.is.null,job_wo.eq.""))');
+  }
+  if(!either.length) return null;
+  try{
+    const url = SUPABASE_URL + '/rest/v1/sessions?select=saved_at,pack_count,content' +
+      '&or=' + encodeURIComponent('(' + either.join(',') + ')') + '&order=saved_at.desc&limit=1';
+    const res = await fetch(url, { headers: supabaseHeaders() });
+    if(!res.ok) return null;
+    const rows = await res.json();
+    return rows[0] && rows[0].content && Array.isArray(rows[0].content.packs)
+      ? { savedAt: rows[0].saved_at, content: rows[0].content } : null;
+  }catch(e){
+    return null;
+  }
 }
 
 async function addFrameIssue(fields){
@@ -1143,7 +1225,15 @@ async function getPageRows(page){
 async function extractDetailerReport(pdfDoc){
   let header = { client:'', jobNumber:'', title:'', sectionTitle:'', frameCount:null };
   const frames = [];
-  const rowRe = /^([A-Za-z0-9.\-]+(?:\s+\([^()]+\))*)\s+([\d.]+)\s*m\s+([\d.]+)\s*m\s+([\d.]+)\s*m\s+(\d+)\s+([\d.]+)\s*kg\s+([\d.]+)\s*kg\s+([\d.]+)\s*kg(?:\s+(.+))?$/;
+  // A bracket written straight onto the name, with no space, is a split
+  // part, not a note: W-14394 lists N113(A), N113(B), N113(C), N113(Infill)
+  // (all drawing N113), the same idea as N504.A / N504.B. It stays in the
+  // name so each part is its own frame. Brackets after that, spaced or not
+  // (BE3000 (WELD), N118(B)(Check Drawing)), are notes as before. Before
+  // this, the regex needed a space before every bracket, so those rows
+  // silently failed to match and couldn't be ticked.
+  const nameRe = /^[A-Za-z0-9.\-]+(?:\([^()]+\))?/;
+  const rowRe = /^([A-Za-z0-9.\-]+(?:\([^()]+\))?(?:\s*\([^()]+\))*)\s+([\d.]+)\s*m\s+([\d.]+)\s*m\s+([\d.]+)\s*m\s+(\d+)\s+([\d.]+)\s*kg\s+([\d.]+)\s*kg\s+([\d.]+)\s*kg(?:\s+(.+))?$/;
 
   for(let p = 1; p <= pdfDoc.numPages; p++){
     const page = await pdfDoc.getPage(p);
@@ -1168,8 +1258,8 @@ async function extractDetailerReport(pdfDoc){
       const rowMatch = r.text.match(rowRe);
       if(rowMatch){
         const fullLabel = rowMatch[1].trim();
-        const baseName = fullLabel.replace(/\s*\([^()]*\)/g, '').trim();
-        const tags = Array.from(fullLabel.matchAll(/\(([^()]+)\)/g)).map(m => m[1].toUpperCase());
+        const baseName = fullLabel.match(nameRe)[0];
+        const tags = Array.from(fullLabel.slice(baseName.length).matchAll(/\(([^()]+)\)/g)).map(m => m[1].toUpperCase());
         if(baseName.toUpperCase() === 'TOTALS' || baseName.toUpperCase() === 'TOTAL') return;
         frames.push({
           name: baseName,
@@ -1308,8 +1398,127 @@ function findDrawingPage(pages, frameName){
   const name = String(frameName || '').toUpperCase();
   const exact = pages.find(p => p.drawingNumber === name);
   if(exact) return exact;
-  const m = name.match(/^([A-Z]{1,6}\d{2,6})[.\-][A-Z0-9.\-]+$/);
+  // "(" too: split parts written N113(A) / N113(INFILL) (W-14394).
+  const m = name.match(/^([A-Z]{1,6}\d{2,6})(?:[.\-][A-Z0-9.\-()]+|\([A-Z0-9 ]+\))$/);
   return m ? pages.find(p => p.drawingNumber === m[1]) || null : null;
+}
+
+/* =========================================================================
+   PACK ORDER — lines the report's frames up with a Frame Pack Sorter plan
+   ========================================================================= */
+// A Pack Sorter save (sessions.content) lists packs in order, each a `base`
+// frame plus `layers` stacked on it, each layer a list of `frames`. A pack's
+// `skipped` is the sorter's working list of what didn't fit in that pack
+// (those frames are in a later pack), so it's ignored. Frames the sorter
+// couldn't pack at all are in the top-level `unpacked` / `oversized`.
+// Names are the report's full labels, but typed spacing and case drift
+// ("N41077(A) (Check Drawing)", "(Check drawing)"), so both sides are cut
+// down to the frame name the same way the report parser does: the id plus a
+// bracket written straight onto it (N113(A)); note brackets dropped.
+function packFrameName(s){
+  // Spaces only come out after the cut, or "BE3000 (WELD)" would join up
+  // into BE3000(WELD) and read as a split part.
+  const t = String(s || '').trim().toUpperCase();
+  const m = t.match(/^[A-Z0-9.\-]+(?:\([^()]+\))?/);
+  return (m ? m[0] : t).replace(/\s+/g, '');
+}
+
+// Returns { packs: [{ n, frames: [{ key, where }] }], notPacked: [key],
+// notInPlan: [key] }, every report frame exactly once. Base first, then
+// layer 1, 2 … (bottom of the pack up; the bay's choice). A name the plan
+// lists twice takes the report's copies in report order (CA1007 #1, #2 …).
+// notPacked: in the plan but left out of every pack. notInPlan: in the
+// report but not the plan (e.g. the report was revised after packing).
+function packOrder(frames, content){
+  const byName = {};
+  frames.forEach(f => { (byName[packFrameName(f.name)] = byName[packFrameName(f.name)] || []).push(f.key); });
+  const take = name => { const q = byName[packFrameName(name)]; return q && q.length ? q.shift() : null; };
+  const packs = [];
+  // n stays the Pack Sorter's own pack number even if a pack ends up empty
+  // here, so "Pack 3" means the same pack on the floor as on the sorter.
+  // Each pack also gets `levels` for its picture (packPictureSvg): every
+  // frame's footprint in mm, seen from above. The save gives sizes (l, w,
+  // already turned when `swapped`) but positions only for hand-placed layers
+  // (`pos`, [along l, along w]). Otherwise a layer's frames sit side by side
+  // along the length, or across the width when the layer is `stacked`: that
+  // is how the sorter adds up totalL / totalW.
+  (content && content.packs || []).forEach((p, i) => {
+    const out = [];
+    const levels = [];
+    const add = (fr, where) => { const k = fr && take(fr.name); if(k) out.push({ key: k, where }); return k; };
+    const box = (fr, k, x, y) => ({ key: k, name: fr.name, x, y, l: +fr.l || 0, w: +fr.w || 0 });
+    if(p.base) levels.push({ where: 'Base', items: [box(p.base, add(p.base, 'Base'), 0, 0)] });
+    (p.layers || []).forEach((l, j) => {
+      const where = 'Layer ' + (j + 1);
+      let along = 0;
+      const items = (l.frames || []).filter(Boolean).map(fr => {
+        const k = add(fr, where);
+        const at = l.pos && l.pos[fr.name];
+        if(at) return box(fr, k, +at[0] || 0, +at[1] || 0);
+        const b = l.stacked ? box(fr, k, 0, along) : box(fr, k, along, 0);
+        along += l.stacked ? b.w : b.l;
+        return b;
+      });
+      if(items.length) levels.push({ where, items });
+    });
+    if(out.length) packs.push({ n: i + 1, frames: out, levels });
+  });
+  const notPacked = [];
+  [].concat(content && content.unpacked || [], content && content.oversized || []).forEach(fr => {
+    const k = fr && take(fr.name); if(k) notPacked.push(k);
+  });
+  const placed = new Set(packs.flatMap(p => p.frames.map(x => x.key)).concat(notPacked));
+  return { packs, notPacked, notInPlan: frames.map(f => f.key).filter(k => !placed.has(k)) };
+}
+
+// The pack drawn from above, one small panel per level (Base, Layer 1 …),
+// all at one scale so the levels compare. The dashed outline in each layer
+// panel is the base, to show how the layer sits on it. Ticked frames are
+// green. labelOf(key) gives the report's name for a frame; a frame in the
+// plan but not the report (key null) is drawn grey with the sorter's name.
+// Returns an HTML string; no DOM, so the tests can check it.
+function packPictureSvg(pack, doneSet, labelOf){
+  const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' })[c]);
+  // Drawn with the pack's long side across, so a tall, narrow pack doesn't
+  // shrink to a sliver: turn every box when the width is the longer side.
+  const raw = pack.levels.flatMap(lv => lv.items);
+  const turn = Math.max(...raw.map(b => b.y + b.w)) > Math.max(...raw.map(b => b.x + b.l));
+  const levels = !turn ? pack.levels : pack.levels.map(lv => Object.assign({}, lv, {
+    items: lv.items.map(b => Object.assign({}, b, { x: b.y, y: b.x, l: b.w, w: b.l }))
+  }));
+  const all = levels.flatMap(lv => lv.items);
+  const maxL = Math.max(1, ...all.map(b => b.x + b.l));
+  const maxW = Math.max(1, ...all.map(b => b.y + b.w));
+  const sc = Math.min(170 / maxL, 130 / maxW);   // panel at most 170 x 130 px
+  const W = Math.round(maxL * sc) + 2, H = Math.round(maxW * sc) + 2;
+  const base = levels[0] && levels[0].where === 'Base' ? levels[0].items[0] : null;
+  const panel = lv => {
+    let g = '';
+    if(base && lv.where !== 'Base'){
+      g += '<rect class="pp-outline" x="1" y="1" width="' + (base.l * sc).toFixed(1) +
+        '" height="' + (base.w * sc).toFixed(1) + '"/>';
+    }
+    lv.items.forEach(b => {
+      const x = 1 + b.x * sc, y = 1 + b.y * sc, w = Math.max(b.l * sc, 1.5), h = Math.max(b.w * sc, 1.5);
+      const cls = b.key == null ? 'pp-other' : doneSet.has(b.key) ? 'pp-done' : 'pp-todo';
+      const name = b.key == null ? String(b.name || '').split(/\s/)[0] : labelOf(b.key);
+      g += '<rect class="' + cls + '" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) +
+        '" width="' + w.toFixed(1) + '" height="' + h.toFixed(1) + '"><title>' + esc(name) + '</title></rect>';
+      // Label only where it fits, turned to run along a tall, narrow frame.
+      const need = name.length * 6.2 + 4;
+      const cx = (x + w / 2).toFixed(1), cy = (y + h / 2).toFixed(1);
+      if(w >= need && h >= 13){
+        g += '<text x="' + cx + '" y="' + cy + '">' + esc(name) + '</text>';
+      } else if(h >= need && w >= 13){
+        g += '<text x="' + cx + '" y="' + cy + '" transform="rotate(-90 ' + cx + ' ' + cy + ')">' + esc(name) + '</text>';
+      }
+    });
+    return '<figure class="pp-level"><figcaption>' + esc(lv.where) + '</figcaption>' +
+      '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" role="img" aria-label="' +
+      esc(lv.where + ': ' + lv.items.map(b => b.key == null ? b.name : labelOf(b.key)).join(', ')) + '">' +
+      g + '</svg></figure>';
+  };
+  return '<div class="pack-picture">' + levels.map(panel).join('') + '</div>';
 }
 
 /* =========================================================================
@@ -1375,6 +1584,8 @@ const AppState = {
   sessionStartTime: null,      // ISO string, null when no session is active
   sessionStartDoneSet: new Set(), // snapshot of doneSet at Start Job time
   issuesByFrame: {}, // frame name -> array of {note, created_at}
+  packPlan: null,    // packOrder() result for this job, null when no plan
+  listOrder: 'report', // 'report' or 'pack' (only used while packPlan is set)
   candidateAttachments: [],
   detailerAtt: null,     // the original report attachment Save Progress versions
   detailerSource: null,  // { sourceId, skipId }: clean report version worked from
@@ -1888,6 +2099,22 @@ async function loadJobFiles(detailerAtt, drawingsAtt){
     if(document.getElementById('screen-report').classList.contains('active')) renderFrameList();
   });
 
+  // The Pack Sorter's plan loads in the background too: the toggle only
+  // appears once one is found, and the list stays in report order till then.
+  AppState.packPlan = null;
+  AppState.listOrder = Store.getListOrder();
+  updateOrderBar();
+  {
+    const job = AppState.currentJob;
+    getPackPlan(job.workOrderId, header).then(plan => {
+      if(AppState.currentJob !== job || !plan) return;
+      AppState.packPlan = Object.assign(packOrder(AppState.frames, plan.content), { savedAt: plan.savedAt });
+      if(!AppState.packPlan.packs.length){ AppState.packPlan = null; return; }
+      updateOrderBar();
+      if(document.getElementById('screen-report').classList.contains('active')) renderFrameList();
+    });
+  }
+
   if(drawingsBytes){
     AppState.drawingsPdf = await loadPdf(drawingsBytes.slice(0));
     AppState.drawingsPageCount = AppState.drawingsPdf.numPages;
@@ -1935,55 +2162,108 @@ function renderFrameList(){
     list.innerHTML = '<div class="empty">No frames match &ldquo;' + escapeHtml(AppState.searchTerm) + '&rdquo;</div>';
   }
 
-  visible.forEach(f => {
-    const done = AppState.doneSet.has(f.key);
-    const issues = AppState.issuesByFrame[f.name] || [];
-    const row = document.createElement('div');
-    row.className = 'frame-row' + (done ? ' done' : '');
-    const tagChips = (f.tags && f.tags.length)
-      ? '<span class="frame-tag-chips">' + f.tags.map(t =>
-          '<span class="tag-chip tag-' + tagSlug(t) + '">' + escapeHtml(t) + '</span>').join('') + '</span>'
-      : '';
-    row.innerHTML =
-      '<div class="check">' + (done ? '&#10003;' : '') + '</div>' +
-      '<div class="info">' +
-        '<div class="name">' + escapeHtml(f.label || f.name) +
-          (f.copy ? ' <span class="copy-of">' + f.copy.n + ' of ' + f.copy.of + '</span>' : '') + tagChips + '</div>' +
-        '<div class="specs">' + escapeHtml(f.totalLength) + ' &middot; ' +
-          escapeHtml(f.fasteners) + ' fasteners &middot; ' + escapeHtml(f.totalWeight) +
-          (f.extraColumns ? '<br><span class="extra-cols">' + escapeHtml(f.extraColumns) + '</span>' : '') +
-        '</div>' +
-      '</div>' +
-      '<div class="row-actions">' +
-        (hasDrawing(f) ? '<button class="row-action-btn btn-view-drawing" title="View drawing">&#128196;</button>' : '') +
-        '<button class="row-action-btn btn-note-issue' + (issues.length ? ' has-issue' : '') + '" title="Note an issue">&#9873;' +
-          (issues.length ? '<span class="issue-count">' + issues.length + '</span>' : '') +
-        '</button>' +
-      '</div>';
-
-    const viewBtn = row.querySelector('.btn-view-drawing');
-    if(viewBtn) viewBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      jumpToFrameDrawing(f);
-    });
-    row.querySelector('.btn-note-issue').addEventListener('click', (e) => {
-      e.stopPropagation();
-      openIssueModal(f);
-    });
-
-    row.addEventListener('click', () => {
-      if(navigator.vibrate) navigator.vibrate(10);
-      if(AppState.doneSet.has(f.key)) AppState.doneSet.delete(f.key);
-      else AppState.doneSet.add(f.key);
-      persistProgress();
-      renderFrameList();
-    });
-    list.appendChild(row);
-  });
+  const plan = AppState.listOrder === 'pack' ? AppState.packPlan : null;
+  if(!plan){
+    visible.forEach(f => list.appendChild(frameRow(f)));
+  } else {
+    // Pack order: one heading per pack, its picture, then its frames base
+    // first. Search still filters; a pack with nothing matching is left out.
+    const shown = new Map(visible.map(f => [f.key, f]));
+    const group = (title, entries, pack) => {
+      const rows = entries.filter(e => shown.has(e.key));
+      if(!rows.length) return;
+      const done = entries.filter(e => AppState.doneSet.has(e.key)).length;
+      const head = document.createElement('div');
+      head.className = 'pack-header' + (done === entries.length ? ' done' : '');
+      head.innerHTML = '<span>' + escapeHtml(title) + '</span><span class="pack-meta">' +
+        done + ' / ' + entries.length + ' done</span>';
+      list.appendChild(head);
+      if(pack && pack.levels.length){
+        const pic = document.createElement('div');
+        pic.innerHTML = packPictureSvg(pack, AppState.doneSet, labelOf);
+        list.appendChild(pic.firstChild);
+      }
+      rows.forEach(e => list.appendChild(frameRow(shown.get(e.key), e.where)));
+    };
+    const byKey = new Map(AppState.frames.map(f => [f.key, f]));
+    const labelOf = k => { const f = byKey.get(k); return f ? f.name + (f.copy ? ' #' + f.copy.n : '') : k; };
+    plan.packs.forEach(p => group('Pack ' + p.n, p.frames, p));
+    group('Not in a pack', plan.notPacked.map(key => ({ key })));
+    group('Not in the pack plan', plan.notInPlan.map(key => ({ key })));
+  }
   // Counts always reflect all frames, not just the filtered/visible ones.
   document.getElementById('doneCount').textContent = AppState.doneSet.size;
   document.getElementById('totalCount').textContent = AppState.frames.length;
 }
+
+// One tickable frame row. `where` ('Base', 'Layer 2') is shown in pack order.
+function frameRow(f, where){
+  const done = AppState.doneSet.has(f.key);
+  const issues = AppState.issuesByFrame[f.name] || [];
+  const row = document.createElement('div');
+  row.className = 'frame-row' + (done ? ' done' : '');
+  const tagChips = (f.tags && f.tags.length)
+    ? '<span class="frame-tag-chips">' + f.tags.map(t =>
+        '<span class="tag-chip tag-' + tagSlug(t) + '">' + escapeHtml(t) + '</span>').join('') + '</span>'
+    : '';
+  row.innerHTML =
+    '<div class="check">' + (done ? '&#10003;' : '') + '</div>' +
+    '<div class="info">' +
+      '<div class="name">' + escapeHtml(f.label || f.name) +
+        (f.copy ? ' <span class="copy-of">' + f.copy.n + ' of ' + f.copy.of + '</span>' : '') + tagChips +
+        (where ? ' <span class="pack-where">' + escapeHtml(where) + '</span>' : '') + '</div>' +
+      '<div class="specs">' + escapeHtml(f.totalLength) + ' &middot; ' +
+        escapeHtml(f.fasteners) + ' fasteners &middot; ' + escapeHtml(f.totalWeight) +
+        (f.extraColumns ? '<br><span class="extra-cols">' + escapeHtml(f.extraColumns) + '</span>' : '') +
+      '</div>' +
+    '</div>' +
+    '<div class="row-actions">' +
+      (hasDrawing(f) ? '<button class="row-action-btn btn-view-drawing" title="View drawing">&#128196;</button>' : '') +
+      '<button class="row-action-btn btn-note-issue' + (issues.length ? ' has-issue' : '') + '" title="Note an issue">&#9873;' +
+        (issues.length ? '<span class="issue-count">' + issues.length + '</span>' : '') +
+      '</button>' +
+    '</div>';
+
+  const viewBtn = row.querySelector('.btn-view-drawing');
+  if(viewBtn) viewBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    jumpToFrameDrawing(f);
+  });
+  row.querySelector('.btn-note-issue').addEventListener('click', (e) => {
+    e.stopPropagation();
+    openIssueModal(f);
+  });
+
+  row.addEventListener('click', () => {
+    if(navigator.vibrate) navigator.vibrate(10);
+    if(AppState.doneSet.has(f.key)) AppState.doneSet.delete(f.key);
+    else AppState.doneSet.add(f.key);
+    persistProgress();
+    renderFrameList();
+  });
+  return row;
+}
+
+// Shows the Report order / Pack order toggle only while there's a plan.
+function updateOrderBar(){
+  const bar = document.getElementById('orderBar');
+  bar.style.display = AppState.packPlan ? 'flex' : 'none';
+  bar.querySelectorAll('button').forEach(b => {
+    b.classList.toggle('active', b.dataset.order === (AppState.packPlan ? AppState.listOrder : 'report'));
+  });
+  const packBtn = bar.querySelector('[data-order="pack"]');
+  const n = AppState.packPlan ? AppState.packPlan.packs.length : 0;
+  packBtn.textContent = n ? 'Pack order (' + n + (n === 1 ? ' pack)' : ' packs)') : 'Pack order';
+}
+document.getElementById('orderBar').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-order]');
+  if(!b || !AppState.packPlan) return;
+  AppState.listOrder = b.dataset.order;
+  Store.setListOrder(AppState.listOrder);
+  updateOrderBar();
+  renderFrameList();
+  document.getElementById('frameList').scrollTop = 0;
+});
 
 document.getElementById('searchInput').addEventListener('input', (e) => {
   AppState.searchTerm = e.target.value;
