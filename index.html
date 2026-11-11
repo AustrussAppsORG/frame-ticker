@@ -202,6 +202,21 @@
     border-radius:7px;background:var(--charcoal);color:#fff;
     font-size:13px;font-weight:800;
   }
+  /* Scheduled machine. The dot is the machine's own colour (the bay names
+     its roll formers Red / Blue / Green), not part of the app palette. */
+  .machine-chip{
+    display:inline-flex;align-items:center;gap:6px;
+    height:26px;padding:0 10px;border-radius:7px;
+    border:2px solid var(--line);background:var(--card);color:var(--text);
+    font-size:13px;font-weight:800;white-space:nowrap;
+  }
+  .machine-chip .dot{width:12px;height:12px;border-radius:50%;background:var(--muted);flex-shrink:0;}
+  .machine-chip.m-red .dot{background:#D32F2F;}
+  .machine-chip.m-blue .dot{background:#1E63C4;}
+  .machine-chip.m-green .dot{background:#2E8B3E;}
+  .machine-chip.unset{color:var(--muted);font-weight:700;}
+  #jobHeader .machine-chip{height:22px;margin-left:8px;vertical-align:middle;font-size:12px;
+    border-color:rgba(255,255,255,.3);background:transparent;color:#fff;}
   .badge{
     display:inline-block;padding:4px 12px;border-radius:20px;
     font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.03em;
@@ -935,7 +950,8 @@ async function getReportData(reportId){
 
 // The columns the job list reads, by title.
 const JOB_COLUMNS = ['Primary', 'Work Order Type', 'Project & Zone Number', 'Complete',
-  'Scheduled Start Date', 'Scheduled End Date', 'Work Record URL', 'F_Profile', 'Designer'];
+  'Scheduled Start Date', 'Scheduled End Date', 'Work Record URL', 'F_Profile', 'Designer',
+  'Scheduled Machine'];
 
 // Every row of a sheet, but only the job list's columns. The Work Order sheet
 // is ~2,000 rows by 148 columns; asking for just these (matched by title,
@@ -996,7 +1012,10 @@ async function getWorkOrders(reportId, sheetId){
       endDate: cellValue(cellFor(row, 'Scheduled End Date')) || null,
       workRecordUrl: cellValue(cellFor(row, 'Work Record URL')) || null,
       gauge: gaugeMatch ? gaugeMatch[1] : null,
-      designer: cellDisplayValue(cellFor(row, 'Designer')) || null
+      designer: cellDisplayValue(cellFor(row, 'Designer')) || null,
+      // Which roll former the job is booked on: Red 90, Blue 90, Green 150 …
+      // A picklist, so value is the display string. Often still blank.
+      machine: String(cellValue(cellFor(row, 'Scheduled Machine')) || '').trim() || null
     };
   }).filter(j => (j.workOrderType || '').toUpperCase() === CONFIG.JOB_TYPE_FILTER);
 
@@ -1662,6 +1681,16 @@ async function loadJobs(force){
   }
 }
 
+// The Scheduled Machine chip: a dot in the machine's colour plus its name
+// ("Red 90"). A job with no machine booked yet says so, muted, rather than
+// showing nothing, so a missing booking is noticed.
+function machineChip(machine){
+  if(!machine) return '<span class="machine-chip unset"><span class="dot"></span>No machine</span>';
+  const colour = (String(machine).match(/\b(red|blue|green)\b/i) || [])[1];
+  return '<span class="machine-chip' + (colour ? ' m-' + colour.toLowerCase() : '') + '">' +
+    '<span class="dot"></span>' + escapeHtml(machine) + '</span>';
+}
+
 function renderJobList(){
   const container = document.getElementById('jobListContainer');
   if(!AppState.jobs.length){
@@ -1692,6 +1721,7 @@ function renderJobList(){
         '<div class="zone">' + escapeHtml(job.zone) + '</div>' +
         '<div class="meta">' +
           (job.gauge ? '<span class="gauge-chip">' + escapeHtml(job.gauge) + '</span>' : '') +
+          machineChip(job.machine) +
           (job.startDate ? '<span><b>Start</b> ' + escapeHtml(job.startDate) + '</span>' : '') +
           (job.endDate ? '<span><b>End</b> ' + escapeHtml(job.endDate) + '</span>' : '') +
           (sessionCount ? '<span>' + sessionCount + ' session' + (sessionCount === 1 ? '' : 's') + '</span>' : '') +
@@ -1714,8 +1744,9 @@ function renderJobList(){
    ========================================================================= */
 async function openJob(job){
   AppState.currentJob = job;
-  document.getElementById('jobHeader').textContent =
-    (job.workOrderId ? job.workOrderId + ' \u2014 ' : '') + job.zone;
+  document.getElementById('jobHeader').innerHTML =
+    escapeHtml((job.workOrderId ? job.workOrderId + ' \u2014 ' : '') + job.zone) +
+    (job.machine ? machineChip(job.machine) : '');
   document.getElementById('btnBack').style.visibility = 'visible';
   const workRecordBtn = document.getElementById('btnWorkRecord');
   if(job.workRecordUrl){

@@ -81,7 +81,12 @@ look there first for the fix.
   (the bay's choice), every word in any order.
 - Columns read, by title: Primary, Work Order Type, Project & Zone Number,
   Complete, Scheduled Start Date, Scheduled End Date, Work Record URL,
-  F_Profile (the leading number is shown as the gauge chip), Designer.
+  F_Profile (the leading number is shown as the gauge chip), Designer,
+  Scheduled Machine (a picklist: Red 90, Blue 90, Green 90, Green 150, Red 150,
+  Red 75, Green 75; shown as a chip with a dot in the machine's colour on the
+  job card and in the open job's header, "No machine" when blank). It's in
+  both the sheet and the Schedule report. As of Nov 2026 it was blank on
+  every open FRAMECAD job, so expect "No machine" until scheduling fills it.
 - Attachments: PDFs only, minus the app's own `IN PROGRESS:` uploads and
   `CONFIG.EXCLUDED_ATTACHMENT_RE`: Smartsheet's generated `Cover Page…`,
   `Pack Label…` and `Mapping for Work Order Weld Label.pdf`, which must

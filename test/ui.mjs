@@ -103,12 +103,12 @@ check('setup screen shown when unconfigured', active('screen-setup'), true);
 /* ------------------------------------------------------------ work orders */
 console.log('\nwork orders from the Smartsheet reports');
 const cell = (col, value, displayValue) => ({ virtualColumnId: col, value, displayValue });
-const COLS = ['Primary', 'Work Order Type', 'Project & Zone Number', 'Complete', 'F_Profile', 'Designer']
+const COLS = ['Primary', 'Work Order Type', 'Project & Zone Number', 'Complete', 'F_Profile', 'Designer', 'Scheduled Machine']
   .map((title, i) => ({ title, virtualId: i + 1 }));
 const woRow = (id, wo, type, zone, complete, extra) =>
   ({ id, sheetId: 2, cells: [cell(1, wo), cell(2, type), cell(3, zone), cell(4, complete)].concat(extra || []) });
 const SCHEDULE = [
-  woRow(1, 'W-100', 'FRAMECAD', 'UNIT 5', 'Not Started', [cell(5, '90mm x 0.75'), cell(6, 'des@austruss.com.au', 'Dee Signer')]),
+  woRow(1, 'W-100', 'FRAMECAD', 'UNIT 5', 'Not Started', [cell(5, '90mm x 0.75'), cell(6, 'des@austruss.com.au', 'Dee Signer'), cell(7, 'Red 90')]),
   woRow(3, 'W-101', 'STRUCTURAL', 'ZONE 1', 'Not Started'),
   woRow(4, 'W-102', 'FRAMECAD', 'ZONE 2', 'Complete')
 ];
@@ -148,11 +148,16 @@ w.eval("Store.setWorkerUrl('https://x.workers.dev'); Store.setAppKey('k');");
 const jobs = JSON.parse(await w.eval('getWorkOrders().then(j => JSON.stringify(j))'));
 check('FRAMECAD jobs only, any status (the list decides which statuses show)', jobs.map(j => j.workOrderId), ['W-100', 'W-102']);
 check('gauge read from F_Profile, designer by name not email', [jobs[0].gauge, jobs[0].designer], ['90', 'Dee Signer']);
+check('scheduled machine read by title, blank when not booked', jobs.map(j => j.machine), ['Red 90', null]);
+w.eval(`AppState.jobs = ${JSON.stringify(jobs)}; AppState.jobSearchTerm = ''; renderJobList();`);
+check('job card shows the machine with its colour, or "No machine"',
+  [...d.querySelectorAll('.job-card .machine-chip')].map(e => e.className + ': ' + e.textContent),
+  ['machine-chip m-red: Red 90', 'machine-chip unset: No machine']);
 reportCalls.length = 0;
 const fromSheet = JSON.parse(await w.eval("getWorkOrders(null, CONFIG.WORK_ORDER_SHEET_ID).then(j => JSON.stringify(j))"));
 check('the Work Order sheet is read in full, FRAMECAD only', fromSheet.length, 990);
 check('only the columns the app needs are downloaded, found by title',
-  reportCalls, ['sheet columns', 'sheet 8417646009601924 p1 cols 101,102,103,104,105,106', 'sheet 8417646009601924 p2 cols 101,102,103,104,105,106', 'sheet 8417646009601924 p3 cols 101,102,103,104,105,106']);
+  reportCalls, ['sheet columns', 'sheet 8417646009601924 p1 cols 101,102,103,104,105,106,107', 'sheet 8417646009601924 p2 cols 101,102,103,104,105,106,107', 'sheet 8417646009601924 p3 cols 101,102,103,104,105,106,107']);
 check('sheet rows get the sheet id (reports carry their own)', [fromSheet[0].sheetId, jobs[0].sheetId], ['8417646009601924', 2]);
 check('newest work order first', [fromSheet[0].workOrderId, fromSheet[fromSheet.length - 1].workOrderId], ['W-21099', 'W-20000']);
 
@@ -316,7 +321,8 @@ w.fetch = okFetch;
 // Normal job. The real report names don't match CONFIG.DETAILER_NAME_RE, so
 // the operator picks it; the bay has accepted that.
 rowAttachments = [att(10, REPORT), att(11, DRAWINGS), att(12, 'IN PROGRESS: 90 - LB WALLS.pdf'), att(13, 'notes.dxf')];
-w.eval("openJob({rowId:1, sheetId:2, workOrderId:'W-100', zone:'UNIT 5'})");
+w.eval("openJob({rowId:1, sheetId:2, workOrderId:'W-100', zone:'UNIT 5', machine:'Red 90'})");
+check('the open job\'s header shows its machine', $('jobHeader').textContent, 'W-100 \u2014 UNIT 5Red 90');
 await waitFor(() => $('modalOverlay').classList.contains('show'));
 check('picker lists only the original PDFs (no IN PROGRESS, no .dxf)',
   [...d.querySelectorAll('#modalList .pick-row .fname')].map(e => e.textContent.trim()), [REPORT, DRAWINGS]);
