@@ -78,7 +78,8 @@ process.on('unhandledRejection', e => runtimeErrors.push('unhandled rejection: '
 const code = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(x => x[1]).join('\n');
 const expose = '\n;Object.assign(window,{Store,AppState,CONFIG,renderJobList,renderFrameList,showScreen,' +
                'setTabbarVisible,openJob,getWorkOrders,renderSessionList,updateSessionBar,' +
-               'pickWorkingVersion,markupKeywords,parseMarkupKeywords,loadWorkingDetailer,findDrawingPage});';
+               'pickWorkingVersion,markupKeywords,parseMarkupKeywords,loadWorkingDetailer,findDrawingPage,' +
+               'getPackPlan,packOrder,updateOrderBar});';
 try{
   w.eval(code + expose);
 }catch(e){
@@ -389,6 +390,62 @@ check('📄 only on frames that have a drawing', [...rows()].map(r => !!r.queryS
 w.eval("AppState.drawingIndexReady = false; renderFrameList();");
 check('while drawings are still being read, every frame keeps its 📄', d.querySelectorAll('#frameList .btn-view-drawing').length, 3);
 w.eval("AppState.drawingIndexReady = true; AppState.drawingPages.push({page:3, drawingNumber:'N101', tags:[]}); renderFrameList();");
+
+/* ---------------------------------------------------------- pack order */
+console.log('\npack order (Frame Pack Sorter plan)');
+// Opening the job asked Supabase for a plan; the stub had none, so the list
+// stays in report order with no toggle.
+const packCall = calls.filter(c => c.url.includes('/rest/v1/sessions')).pop();
+check('opening a job looks for a pack plan', !!packCall, true);
+check('by work order, or a no-WO save with the same job number, title and section',
+  decodeURIComponent(new URL(packCall.url).searchParams.get('or') || ''),
+  '(job_wo.eq."W-100",and(job_num.eq."26040",job_title.eq."UNIT 5",job_sub.eq."90_LB Walls",or(job_wo.is.null,job_wo.eq."")))');
+check('newest save wins', [new URL(packCall.url).searchParams.get('order'), new URL(packCall.url).searchParams.get('limit')], ['saved_at.desc', '1']);
+check('no plan: no toggle', $('orderBar').style.display, 'none');
+
+const PLAN = { packs: [
+  { base: { name: 'N101-1', l: 2000, w: 1000 }, layers: [{ frames: [{ name: 'L501 (WELD)', l: 1200, w: 900 }, { name: 'GONE', l: 600, w: 900 }] }],
+    skipped: [{ name: 'L500' }] }
+], unpacked: [], oversized: [] };
+const okRoute = w.fetch;
+w.fetch = async (url, opts) => String(url).includes('/rest/v1/sessions')
+  ? { ok: true, json: async () => [{ saved_at: '2026-11-03T00:00:00Z', content: PLAN }] } : okRoute(url, opts);
+check('getPackPlan returns the save', await w.eval("getPackPlan('W-100', AppState.header).then(p => p && p.content.packs.length)"), 1);
+w.fetch = okRoute;
+w.eval(`AppState.packPlan = packOrder(AppState.frames, ${JSON.stringify(PLAN)}); updateOrderBar(); renderFrameList();`);
+check('plan found: toggle shows, report order still first',
+  [$('orderBar').style.display, d.querySelector('#orderBar .active').dataset.order, d.querySelector('#orderBar [data-order="pack"]').textContent],
+  ['flex', 'report', 'Pack order (1 pack)']);
+check('report order unchanged', [...rows()].map(r => r.querySelector('.name').firstChild.textContent), ['L500', 'L501 (WELD)', 'N101-1']);
+click(d.querySelector('#orderBar [data-order="pack"]'));
+check('pack order: base first, then layers; frames not in the plan last',
+  [...d.querySelectorAll('#frameList .pack-header, #frameList .frame-row')].map(e =>
+    e.classList.contains('pack-header') ? '# ' + e.firstChild.textContent : e.querySelector('.name').firstChild.textContent.trim()),
+  ['# Pack 1', 'N101-1', 'L501 (WELD)', '# Not in the pack plan', 'L500']);
+check('each row says where it sits in the pack',
+  [...rows()].map(r => (r.querySelector('.pack-where') || {}).textContent || ''), ['Base', 'Layer 1', '']);
+check('pack heading counts what is done', d.querySelector('.pack-header .pack-meta').textContent, '0 / 2 done');
+const pic = () => d.querySelector('#frameList .pack-picture');
+check('pack picture under its heading: one panel per level',
+  [pic().previousElementSibling.classList.contains('pack-header'), [...pic().querySelectorAll('figcaption')].map(e => e.textContent)],
+  [true, ['Base', 'Layer 1']]);
+check('layer frames sit side by side along the length, base outline behind them',
+  [...pic().querySelectorAll('.pp-level')[1].querySelectorAll('rect')].map(r => r.getAttribute('class') + '@' + r.getAttribute('x')),
+  ['pp-outline@1', 'pp-todo@1.0', 'pp-other@103.0']);
+check('a frame in the plan but not the report is drawn grey with its plan name',
+  pic().querySelector('.pp-other title').textContent, 'GONE');
+click(rows()[0]);
+check('ticking turns the frame green in the picture', pic().querySelector('.pp-level rect').getAttribute('class'), 'pp-done');
+check('ticking in pack order ticks the right frame',
+  [w.eval('AppState.doneSet.has("N101-1")'), d.querySelector('.pack-header .pack-meta').textContent], [true, '1 / 2 done']);
+check('choice remembered on this tablet', w.localStorage.getItem('fc_list_order'), 'pack');
+$('searchInput').value = 'L50'; $('searchInput').dispatchEvent(new w.Event('input'));
+check('search still filters, packs with no match hidden',
+  [...d.querySelectorAll('#frameList .pack-header')].map(e => e.firstChild.textContent), ['Pack 1', 'Not in the pack plan']);
+click($('btnClearSearch'));
+click(d.querySelector('#orderBar [data-order="report"]'));
+check('back to report order', [d.querySelectorAll('#frameList .pack-header').length, w.localStorage.getItem('fc_list_order')], [0, 'report']);
+w.eval("AppState.doneSet.delete('N101-1'); AppState.packPlan = null; updateOrderBar(); renderFrameList(); persistProgress();");
 
 /* ------------------------------------------------- start job + save */
 console.log('\nstart job and save progress');
