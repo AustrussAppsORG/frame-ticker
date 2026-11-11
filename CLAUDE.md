@@ -160,6 +160,11 @@ Uses pdf.js 3.11.174 (loaded from cdnjs) to read the text layer, and pdf-lib
   text is kept as `label`, the stripped name as `name`, which is what ticks are
   stored under so a suffix changing between revisions keeps its tick. The
   report's own `Frame Count :` line lets the tests check nothing was dropped.
+- A bracket written **straight onto** the name, no space (`N113(A)`,
+  `N113(Infill)`, W-14394), is a split part, not a note: it stays in `name`
+  (so each part is its own frame) and `findDrawingPage` maps it to drawing
+  `N113`. Brackets after that, spaced or not (`N118(B)(Check Drawing)`), are
+  notes as above.
 - Drawing identity is a **strategy list, first match wins**
   (`extractDrawingNumberFromTokens`). Add to it; don't rewrite the existing
   entries, each is tuned to a real export:
